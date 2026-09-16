@@ -1,0 +1,4 @@
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
+import Dashboard from "@/components/dashboard";
+export default async function DashboardPage(){const supabase=await createClient();const{data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");const today=new Date().toISOString().slice(0,10);const start=new Date();start.setDate(start.getDate()-6);const[{data:profile},{data:todayLogs},{data:weekLogs}]=await Promise.all([supabase.from("users").select("target_kalori").eq("id",user.id).single(),supabase.from("food_logs").select("*").eq("tanggal",today).order("created_at"),supabase.from("food_logs").select("kalori,tanggal").gte("tanggal",start.toISOString().slice(0,10)).lte("tanggal",today)]);return <Dashboard userId={user.id} email={user.email||""} target={profile?.target_kalori||2000} initialLogs={todayLogs||[]} weekLogs={weekLogs||[]}/>}
