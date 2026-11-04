@@ -21,34 +21,47 @@ const schema = {
   required: ["nama_makanan", "kalori", "rincian_nutrisi", "waktu_makan"],
 };
 
+// Urutan model cepat dengan latensi rendah (1-3 detik)
 const MODEL_PRIORITY = [
   "gemini-3.8-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
   "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
 ];
 
 async function generateWithFallback(parts: unknown[], apiKey: string) {
   const configured = process.env.GEMINI_MODEL?.trim();
+  // Hindari gemini-3.5-flash yang sudah deprecated karena routing tambahannya menambah latensi
+  const normalizedConfigured =
+    configured === "gemini-3.5-flash" ? "gemini-3.6-flash" : configured;
+
   const models = Array.from(
-    new Set([configured, ...MODEL_PRIORITY].filter(Boolean) as string[])
+    new Set([normalizedConfigured, ...MODEL_PRIORITY].filter(Boolean) as string[])
   );
 
   let lastError = "Gemini gagal menganalisis makanan.";
 
   for (const model of models) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const supportsZeroThinkingBudget =
+        model.startsWith("gemini-2.5-") || model.includes("flash-lite");
+
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(9000),
           body: JSON.stringify({
             contents: [{ parts }],
             generationConfig: {
               responseMimeType: "application/json",
               responseSchema: schema,
               temperature: 0.2,
+              ...(supportsZeroThinkingBudget
+                ? { thinkingConfig: { thinkingBudget: 0 } }
+                : {}),
             },
           }),
         }
@@ -64,12 +77,17 @@ async function generateWithFallback(parts: unknown[], apiKey: string) {
       lastError =
         json?.error?.message || `Model ${model} gagal merespons (${res.status}).`;
 
-      // Jika model sedang penuh (503) atau terkena limit sesaat (429), coba ulang sekali lalu pindah ke model berikutnya
-      if (res.status === 503 || res.status === 429) {
-        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
-        continue;
+      // Jika error karena API key salah / request tidak valid (400/401/403), jangan lanjut ke model lain kecuali 400 karena parameter
+      if (res.status === 401 || res.status === 403) {
+        break;
       }
-      break;
+    } catch (err) {
+      lastError =
+        err instanceof Error && err.name === "TimeoutError"
+          ? `Model ${model} terlalu lama merespons, mencoba model cadangan...`
+          : err instanceof Error
+          ? err.message
+          : "Koneksi ke Gemini terputus.";
     }
   }
 
@@ -120,7 +138,7 @@ export async function POST(request: Request) {
 
     const parts: unknown[] = [
       {
-        text: `Anda ahli estimasi nutrisi makanan Indonesia. Analisis makanan berikut secara konservatif. Semua makro dalam gram dan kalori bilangan bulat. Tentukan waktu makan yang paling mungkin berdasarkan waktu lokal saat ini. Deskripsi pengguna: ${description || "Tidak ada deskripsi"}. Jangan memberi saran medis.`,
+        text: `Anda ahli estimasi nutrisi makanan Indonesia. Analisis makanan berikut secara konservatif dan cepat. Semua makro dalam gram dan kalori bilangan bulat. Tentukan waktu makan yang paling mungkin berdasarkan waktu lokal saat ini. Deskripsi pengguna: ${description || "Tidak ada deskripsi"}. Jangan memberi saran medis.`,
       },
     ];
 
